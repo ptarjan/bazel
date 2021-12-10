@@ -267,7 +267,7 @@ public final class SequencedSkyframeExecutor extends SkyframeExecutor {
         options);
     long startTime = System.nanoTime();
     WorkspaceInfoFromDiff workspaceInfo =
-        handleDiffs(eventHandler, packageOptions.checkOutputFiles, options);
+        handleDiffs(eventHandler, packageOptions.checkOutputFiles, packageOptions.checkExternalFiles, options);
     long stopTime = System.nanoTime();
     Profiler.instance().logSimpleTask(startTime, stopTime, ProfilerTask.INFO, "handleDiffs");
     long duration = stopTime - startTime;
@@ -344,12 +344,12 @@ public final class SequencedSkyframeExecutor extends SkyframeExecutor {
       dropConfiguredTargetsNow(eventHandler);
       super.lastAnalysisDiscarded = false;
     }
-    handleDiffs(eventHandler, /*checkOutputFiles=*/false, OptionsProvider.EMPTY);
+    handleDiffs(eventHandler, /*checkOutputFiles=*/false, /*checkExternalFiles=*/true, OptionsProvider.EMPTY);
   }
 
   @Nullable
   private WorkspaceInfoFromDiff handleDiffs(
-      ExtendedEventHandler eventHandler, boolean checkOutputFiles, OptionsProvider options)
+      ExtendedEventHandler eventHandler, boolean checkOutputFiles, boolean checkExternalFiles, OptionsProvider options)
       throws InterruptedException, AbruptExitException {
     TimestampGranularityMonitor tsgm = this.tsgm.get();
     modifiedFiles = 0;
@@ -385,13 +385,18 @@ public final class SequencedSkyframeExecutor extends SkyframeExecutor {
     int fsvcThreads = buildRequestOptions == null ? 200 : buildRequestOptions.fsvcThreads;
     handleDiffsWithCompleteDiffInformation(
         tsgm, modifiedFilesByPathEntry, managedDirectoriesChanged, fsvcThreads);
-    handleDiffsWithMissingDiffInformation(
-        eventHandler,
-        tsgm,
-        pathEntriesWithoutDiffInformation,
-        checkOutputFiles,
-        managedDirectoriesChanged,
-        fsvcThreads);
+    if (checkOutputFiles || checkExternalFiles) {
+      handleDiffsWithMissingDiffInformation(
+          eventHandler,
+          tsgm,
+          pathEntriesWithoutDiffInformation,
+          checkOutputFiles,
+          checkExternalFiles,
+          managedDirectoriesChanged,
+          fsvcThreads);
+    } else {
+      logger.atInfo().log("Skipping scanning the filesystem for cache invalidations, yay!");
+    }
     handleClientEnvironmentChanges();
     return workspaceInfo;
   }
@@ -482,6 +487,7 @@ public final class SequencedSkyframeExecutor extends SkyframeExecutor {
       TimestampGranularityMonitor tsgm,
       Set<Pair<Root, ProcessableModifiedFileSet>> pathEntriesWithoutDiffInformation,
       boolean checkOutputFiles,
+      boolean checkExternalFiles,
       boolean managedDirectoriesChanged,
       int fsvcThreads)
       throws InterruptedException {
@@ -525,16 +531,18 @@ public final class SequencedSkyframeExecutor extends SkyframeExecutor {
     // incorrectly think there are no longer any external files.
     ExternalFilesHelper tmpExternalFilesHelper =
         externalFilesHelper.cloneWithFreshExternalFilesKnowledge();
+    EnumSet<FileType> fileTypesToCheck = EnumSet.noneOf(FileType.class);
+    if (checkExternalFiles) {
+      fileTypesToCheck =
+          EnumSet.of(FileType.EXTERNAL_REPO, FileType.EXTERNAL_IN_MANAGED_DIRECTORY, FileType.EXTERNAL);
+    }
     // See the comment for FileType.OUTPUT for why we need to consider output files here.
-    EnumSet<FileType> fileTypesToCheck =
-        checkOutputFiles
-            ? EnumSet.of(
-                FileType.EXTERNAL,
-                FileType.EXTERNAL_REPO,
-                FileType.EXTERNAL_IN_MANAGED_DIRECTORY,
-                FileType.OUTPUT)
-            : EnumSet.of(
-                FileType.EXTERNAL, FileType.EXTERNAL_REPO, FileType.EXTERNAL_IN_MANAGED_DIRECTORY);
+    if (checkOutputFiles) {
+      fileTypesToCheck.add(FileType.OUTPUT);
+    }
+    if (!checkExternalFiles && !checkOutputFiles) {
+      throw new AssertionError("should have already early exited");
+    }
     logger.atInfo().log(
         "About to scan skyframe graph checking for filesystem nodes of types %s",
         Iterables.toString(fileTypesToCheck));
